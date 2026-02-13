@@ -334,12 +334,24 @@ def move_then_capture(camera_name, settle_seconds=4.0):
 # --------------------------------------------------
 # Telegram Sender (ALWAYS logs message)
 # --------------------------------------------------
+from datetime import datetime
+
 def send_telegram(text, image_path=None):
-    # Always log intended message
+    """
+    Always logs what would be sent.
+    Caption format:
+      🕒 YYYY-MM-DD HH:MM:SS AM/PM
+      <message>
+    """
+
+    ts = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
+    caption = f"🕒 {ts}\n{text}"
+
+    # Always log intended message (with timestamp)
     if image_path:
-        log.info(f"[TELEGRAM] caption={text!r} | image={image_path}")
+        log.info(f"[TELEGRAM] caption={caption!r} | image={image_path}")
     else:
-        log.info(f"[TELEGRAM] text={text!r}")
+        log.info(f"[TELEGRAM] text={caption!r}")
 
     if not TELEGRAM_ENABLED:
         log.info("Telegram disabled (--telegram_off). Not sending.")
@@ -354,14 +366,14 @@ def send_telegram(text, image_path=None):
             with open(image_path, "rb") as photo:
                 r = requests.post(
                     f"{base}/sendPhoto",
-                    data={"chat_id": chat_id, "caption": text},
+                    data={"chat_id": chat_id, "caption": caption},
                     files={"photo": photo},
                     timeout=20,
                 )
         else:
             r = requests.post(
                 f"{base}/sendMessage",
-                data={"chat_id": chat_id, "text": text},
+                data={"chat_id": chat_id, "text": caption},
                 timeout=20,
             )
 
@@ -372,7 +384,7 @@ def send_telegram(text, image_path=None):
 
     except Exception as e:
         log.warning(f"Telegram send failed: {e}")
-
+        
 # --------------------------------------------------
 # Main
 # --------------------------------------------------
