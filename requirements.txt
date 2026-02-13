@@ -1,0 +1,11 @@
+# HTTP requests
+requests>=2.28.0
+
+# OpenCV (cv2)
+opencv-python>=4.8.0
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# ONVIF camera control
+onvif-zeep>=0.2.12
