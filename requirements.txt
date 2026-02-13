@@ -9,3 +9,6 @@ python-dotenv>=1.0.0
 
 # ONVIF camera control
 onvif-zeep>=0.2.12
+
+# OpenAI API (GPT vision)
+openai>=1.0.0

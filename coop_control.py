@@ -6,59 +6,27 @@ import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 import shutil
-import requests
+import base64
+import re
 
+import requests
 import cv2
 from dotenv import load_dotenv
 from onvif import ONVIFCamera
+from openai import OpenAI
 
 # --------------------------------------------------
-# CLI FIRST (needed for conditional validation)
+# CLI FIRST
 # --------------------------------------------------
 parser = argparse.ArgumentParser()
 parser.add_argument("--telegram_off", action="store_true")
 args = parser.parse_args()
-
 TELEGRAM_ENABLED = not args.telegram_off
 
 # --------------------------------------------------
-# Load Environment
+# Load .env (override system env!)
 # --------------------------------------------------
-load_dotenv()
-
-# --------------------------------------------------
-# Validate Environment Variables
-# --------------------------------------------------
-def validate_env():
-    required = [
-        "ROOST_IP", "ROOST_USER", "ROOST_PASS", "ROOST_PRESET",
-        "AUTO_DOOR_IP", "AUTO_DOOR_USER", "AUTO_DOOR_PASS", "AUTO_DOOR_PRESET",
-    ]
-
-    if TELEGRAM_ENABLED:
-        required.extend([
-            "TELEGRAM_BOT_TOKEN",
-            "TELEGRAM_CHAT_ID",
-        ])
-
-    missing = [v for v in required if not (os.getenv(v) or "").strip()]
-
-    if missing:
-        print("\n❌ Missing required environment variables:\n")
-        for m in missing:
-            print(f"   - {m}")
-        print("\nCheck your .env file.\n")
-        sys.exit(1)
-
-    for port_var in ("ROOST_ONVIF_PORT", "AUTO_DOOR_ONVIF_PORT"):
-        if os.getenv(port_var):
-            try:
-                int(os.getenv(port_var))
-            except ValueError:
-                print(f"❌ {port_var} must be an integer.")
-                sys.exit(1)
-
-validate_env()
+load_dotenv(override=True)
 
 # --------------------------------------------------
 # Logging Setup
@@ -91,6 +59,127 @@ def setup_logger():
     return logger
 
 log = setup_logger()
+
+# --------------------------------------------------
+# Validate Environment Variables
+# --------------------------------------------------
+def validate_env():
+    required = [
+        "ROOST_IP", "ROOST_USER", "ROOST_PASS", "ROOST_PRESET",
+        "AUTO_DOOR_IP", "AUTO_DOOR_USER", "AUTO_DOOR_PASS", "AUTO_DOOR_PRESET",
+        "TOTAL_CHICKENS", "DOOR_EXPECTED_STATE",
+        "OPENAI_API_KEY",
+    ]
+
+    if TELEGRAM_ENABLED:
+        required.extend(["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"])
+
+    missing = [v for v in required if not (os.getenv(v) or "").strip()]
+    if missing:
+        print("\n❌ Missing required environment variables:\n")
+        for m in missing:
+            print(f"   - {m}")
+        print("\nCheck your .env file.\n")
+        sys.exit(1)
+
+    # Validate TOTAL_CHICKENS
+    try:
+        tc = int(os.getenv("TOTAL_CHICKENS"))
+        if tc <= 0:
+            raise ValueError
+    except ValueError:
+        print("❌ TOTAL_CHICKENS must be a positive integer.")
+        sys.exit(1)
+
+    # Validate door expected state
+    des = os.getenv("DOOR_EXPECTED_STATE").strip().upper()
+    if des not in ("OPEN", "CLOSED"):
+        print("❌ DOOR_EXPECTED_STATE must be OPEN or CLOSED.")
+        sys.exit(1)
+
+validate_env()
+
+TOTAL_CHICKENS = int(os.getenv("TOTAL_CHICKENS"))
+DOOR_EXPECTED_STATE = os.getenv("DOOR_EXPECTED_STATE").strip().upper()
+
+log.info(f"TOTAL_CHICKENS loaded = {TOTAL_CHICKENS}")
+log.info(f"DOOR_EXPECTED_STATE loaded = {DOOR_EXPECTED_STATE}")
+log.info(f"TELEGRAM_ENABLED = {TELEGRAM_ENABLED}")
+
+# --------------------------------------------------
+# OpenAI Setup
+# --------------------------------------------------
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+
+def image_to_data_url(image_path):
+    with open(image_path, "rb") as f:
+        b64 = base64.b64encode(f.read()).decode("utf-8")
+    return f"data:image/jpeg;base64,{b64}"
+
+def openai_roost_count(image_path):
+    data_url = image_to_data_url(image_path)
+
+    prompt = (
+        "Count the number of chickens visible in this image.\n"
+        "Return ONLY a single integer. No words."
+    )
+
+    resp = client.responses.create(
+        model=OPENAI_MODEL,
+        input=[{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": prompt},
+                {"type": "input_image", "image_url": data_url},
+            ],
+        }],
+    )
+
+    text = resp.output_text.strip()
+    match = re.search(r"\d+", text)
+    if not match:
+        raise RuntimeError(f"Could not parse count from: {text}")
+    return int(match.group(0))
+
+def openai_door_state(image_path):
+    data_url = image_to_data_url(image_path)
+
+    prompt = (
+        "Is the chicken coop door OPEN or CLOSED?\n"
+        "Return ONLY one word: OPEN or CLOSED."
+    )
+
+    resp = client.responses.create(
+        model=OPENAI_MODEL,
+        input=[{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": prompt},
+                {"type": "input_image", "image_url": data_url},
+            ],
+        }],
+    )
+
+    text = resp.output_text.strip().upper()
+    if "CLOSED" in text:
+        return "CLOSED"
+    if "OPEN" in text:
+        return "OPEN"
+    raise RuntimeError(f"Could not parse door state from: {text}")
+
+# --------------------------------------------------
+# Format Messages
+# --------------------------------------------------
+def format_roost_message(found):
+    if found == TOTAL_CHICKENS:
+        return f"🐔 All {found} out of {TOTAL_CHICKENS} chickens found."
+    return f"🔴 PROBLEM: Only {found} out of {TOTAL_CHICKENS} chickens found."
+
+def format_door_message(state):
+    if state == DOOR_EXPECTED_STATE:
+        return f"🚪 Door is {state} (OK)."
+    return f"🔴 PROBLEM: Door is {state}, expected {DOOR_EXPECTED_STATE}."
 
 # --------------------------------------------------
 # Camera Config
@@ -131,7 +220,6 @@ def with_retries(fn, tries=4, delay=1.0, backoff=2.0, label="operation"):
             last_exception = e
             if attempt == tries:
                 break
-
             log.warning(f"{label} failed (attempt {attempt}/{tries}): {e}")
             time.sleep(current_delay)
             current_delay *= backoff
@@ -139,36 +227,28 @@ def with_retries(fn, tries=4, delay=1.0, backoff=2.0, label="operation"):
     raise last_exception
 
 # --------------------------------------------------
-# ONVIF Preset Movement
+# Move to Preset
 # --------------------------------------------------
 def goto_preset(cam_cfg):
     def _move():
-        cam = ONVIFCamera(
-            cam_cfg["ip"],
-            cam_cfg["port"],
-            cam_cfg["user"],
-            cam_cfg["pw"],
-        )
+        cam = ONVIFCamera(cam_cfg["ip"], cam_cfg["port"], cam_cfg["user"], cam_cfg["pw"])
         media = cam.create_media_service()
         ptz = cam.create_ptz_service()
 
         profile = media.GetProfiles()[0]
         presets = ptz.GetPresets({"ProfileToken": profile.token})
 
-        match = None
+        wanted = cam_cfg["preset"].strip().lower()
         for p in presets:
             name = (getattr(p, "Name", "") or "").strip().lower()
-            if name == cam_cfg["preset"].strip().lower():
-                match = p
-                break
+            if name == wanted:
+                req = ptz.create_type("GotoPreset")
+                req.ProfileToken = profile.token
+                req.PresetToken = p.token
+                ptz.GotoPreset(req)
+                return
 
-        if not match:
-            raise RuntimeError(f"Preset '{cam_cfg['preset']}' not found")
-
-        req = ptz.create_type("GotoPreset")
-        req.ProfileToken = profile.token
-        req.PresetToken = match.token
-        ptz.GotoPreset(req)
+        raise RuntimeError(f"Preset '{cam_cfg['preset']}' not found")
 
     with_retries(_move, label="GotoPreset")
 
@@ -176,54 +256,54 @@ def goto_preset(cam_cfg):
 # Capture JPG
 # --------------------------------------------------
 def capture_jpg(cam_cfg):
-    os.makedirs("logs", exist_ok=True)
-
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     base = cam_cfg["jpg_base"]
 
-    timestamped_path = f"logs/{base}_{timestamp}.jpg"
-    latest_path = f"logs/{base}.jpg"
+    timestamped = f"logs/{base}_{timestamp}.jpg"
+    latest = f"logs/{base}.jpg"
 
     def _capture():
         rtsp = build_rtsp(cam_cfg["user"], cam_cfg["pw"], cam_cfg["ip"])
         cap = cv2.VideoCapture(rtsp)
         time.sleep(1.5)
-
         ok, frame = cap.read()
         cap.release()
 
         if not ok or frame is None:
-            raise RuntimeError("RTSP frame capture failed")
+            raise RuntimeError("RTSP capture failed")
 
-        cv2.imwrite(timestamped_path, frame)
-        shutil.copyfile(timestamped_path, latest_path)
+        cv2.imwrite(timestamped, frame)
+        shutil.copyfile(timestamped, latest)
 
     with_retries(_capture, label="RTSP Capture")
-
-    return timestamped_path
+    return timestamped
 
 # --------------------------------------------------
-# Combined Move + Capture
+# Move + Capture
 # --------------------------------------------------
 def move_then_capture(camera_name, settle_seconds=4.0):
     cam_cfg = CAMERAS[camera_name]
-
     log.info(f"Starting {camera_name} check")
-    goto_preset(cam_cfg)
 
+    goto_preset(cam_cfg)
     time.sleep(settle_seconds)
 
-    image_path = capture_jpg(cam_cfg)
-    log.info(f"{camera_name} image saved: {image_path}")
-
-    return image_path
+    img = capture_jpg(cam_cfg)
+    log.info(f"{camera_name} image saved: {img}")
+    return img
 
 # --------------------------------------------------
-# Telegram Sender
+# Telegram Sender (ALWAYS logs message)
 # --------------------------------------------------
 def send_telegram(text, image_path=None):
+    # Always log intended message
+    if image_path:
+        log.info(f"[TELEGRAM] caption={text!r} | image={image_path}")
+    else:
+        log.info(f"[TELEGRAM] text={text!r}")
+
     if not TELEGRAM_ENABLED:
-        log.info("Telegram disabled.")
+        log.info("Telegram disabled (--telegram_off). Not sending.")
         return
 
     token = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -233,37 +313,48 @@ def send_telegram(text, image_path=None):
     try:
         if image_path:
             with open(image_path, "rb") as photo:
-                requests.post(
+                r = requests.post(
                     f"{base}/sendPhoto",
                     data={"chat_id": chat_id, "caption": text},
                     files={"photo": photo},
                     timeout=20,
                 )
         else:
-            requests.post(
+            r = requests.post(
                 f"{base}/sendMessage",
                 data={"chat_id": chat_id, "text": text},
                 timeout=20,
             )
 
-        log.info("Telegram message sent.")
+        if not r.ok:
+            log.warning(f"Telegram send failed: {r.status_code} {r.text}")
+        else:
+            log.info("Telegram message sent.")
 
     except Exception as e:
         log.warning(f"Telegram send failed: {e}")
 
 # --------------------------------------------------
-# Main Execution
+# Main
 # --------------------------------------------------
 if __name__ == "__main__":
 
+    # ROOST
     roost_img = move_then_capture("roost")
-    send_telegram(
-        text=f"Roost snapshot captured (preset: {CAMERAS['roost']['preset']})",
-        image_path=roost_img,
-    )
+    try:
+        count = openai_roost_count(roost_img)
+        roost_msg = format_roost_message(count)
+    except Exception as e:
+        roost_msg = f"🔴 PROBLEM: Roost analysis failed ({e})"
 
-    auto_door_img = move_then_capture("auto_door")
-    send_telegram(
-        text=f"Auto Door snapshot captured (preset: {CAMERAS['auto_door']['preset']})",
-        image_path=auto_door_img,
-    )
+    send_telegram(roost_msg, roost_img)
+
+    # AUTO DOOR
+    door_img = move_then_capture("auto_door")
+    try:
+        state = openai_door_state(door_img)
+        door_msg = format_door_message(state)
+    except Exception as e:
+        door_msg = f"🔴 PROBLEM: Door analysis failed ({e})"
+
+    send_telegram(door_msg, door_img)
