@@ -120,27 +120,66 @@ def image_to_data_url(image_path):
 def openai_roost_count(image_path):
     data_url = image_to_data_url(image_path)
 
-    prompt = (
-        "Count the number of chickens visible in this image.\n"
-        "Return ONLY a single integer. No words."
+    # -------------------------
+    # PASS 1 (normal count)
+    # -------------------------
+    prompt_pass1 = (
+        f"Count the number of chickens visible in this image.\n"
+        f"Count the chickens one by one.\n"
+        f"Identify chickens by locating heads or eye reflections. "
+        f"If these are not visible then use body shapes.\n"
+        f"Some chickens may be partially hidden or overlapping.\n"
+        f"Assume no chicken is fully occluded unless proven otherwise.\n"
+        f"Carefully check edges, corners, and underneath other chickens.\n"
+        f"The amount we are looking for is {TOTAL_CHICKENS}.\n"
+        f"If the count is less than {TOTAL_CHICKENS}, do a recount but don't make up numbers.\n"
+        f"Return ONLY a single integer. No words."
     )
 
-    resp = client.responses.create(
-        model=OPENAI_MODEL,
-        input=[{
-            "role": "user",
-            "content": [
-                {"type": "input_text", "text": prompt},
-                {"type": "input_image", "image_url": data_url},
-            ],
-        }],
+    def run_prompt(prompt_text):
+        resp = client.responses.create(
+            model=OPENAI_MODEL,
+            input=[{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt_text},
+                    {"type": "input_image", "image_url": data_url},
+                ],
+            }],
+        )
+        text = resp.output_text.strip()
+        match = re.search(r"\d+", text)
+        if not match:
+            raise RuntimeError(f"Could not parse count from: {text}")
+        return int(match.group(0))
+
+    count1 = run_prompt(prompt_pass1)
+    log.info(f"OpenAI pass1 chicken count = {count1}")
+
+    # -------------------------
+    # If correct, return immediately
+    # -------------------------
+    if count1 == TOTAL_CHICKENS:
+        return count1
+
+    # -------------------------
+    # PASS 2 (strict recount)
+    # -------------------------
+    prompt_pass2 = (
+        f"You previously counted {count1} chickens.\n"
+        f"The expected total is {TOTAL_CHICKENS}.\n"
+        f"Do a FULL recount carefully.\n"
+        f"List chickens mentally one-by-one before giving final answer.\n"
+        f"Look for hidden chickens underneath or overlapping.\n"
+        f"Be conservative. Do not double count.\n"
+        f"Return ONLY the final integer count. No words."
     )
 
-    text = resp.output_text.strip()
-    match = re.search(r"\d+", text)
-    if not match:
-        raise RuntimeError(f"Could not parse count from: {text}")
-    return int(match.group(0))
+    count2 = run_prompt(prompt_pass2)
+    log.info(f"OpenAI pass2 chicken count = {count2}")
+
+    return count2
+
 
 def openai_door_state(image_path):
     data_url = image_to_data_url(image_path)
