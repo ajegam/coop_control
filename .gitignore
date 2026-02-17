@@ -43,4 +43,7 @@ Thumbs.db
 
 # Logs and local data
 *.log
+*.jpg
 logs/
+
+
