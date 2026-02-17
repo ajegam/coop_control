@@ -110,7 +110,7 @@ log.info(f"TELEGRAM_ENABLED = {TELEGRAM_ENABLED}")
 # OpenAI Setup
 # --------------------------------------------------
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.0")
 
 def image_to_data_url(image_path):
     with open(image_path, "rb") as f:
@@ -126,7 +126,7 @@ def openai_roost_count(image_path):
     prompt_pass1 = (
         f"Count the number of chickens visible in this image.\n"
         f"Count the chickens one by one.\n"
-        f"Identify chickens by locating heads or eye reflections. "
+        f"Identify chickens by locating heads or eye reflections.\n"
         f"If these are not visible then use body shapes.\n"
         f"Some chickens may be partially hidden or overlapping.\n"
         f"Assume no chicken is fully occluded unless proven otherwise.\n"
@@ -384,7 +384,7 @@ def send_telegram(text, image_path=None):
 
     except Exception as e:
         log.warning(f"Telegram send failed: {e}")
-        
+
 # --------------------------------------------------
 # Main
 # --------------------------------------------------
