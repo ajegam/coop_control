@@ -116,7 +116,7 @@ log.info(f"TELEGRAM_ENABLED = {TELEGRAM_ENABLED}")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # Tried Models
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.0")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
 
 def image_to_data_url(image_path):
     with open(image_path, "rb") as f:
