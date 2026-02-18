@@ -14,6 +14,10 @@ import cv2
 from dotenv import load_dotenv
 from onvif import ONVIFCamera
 from openai import OpenAI
+from pathlib import Path
+
+# Need for Camera WSDL
+WSDL_DIR = str(Path(__file__).resolve().parent / "wsdl")
 
 # --------------------------------------------------
 # CLI FIRST
@@ -111,7 +115,7 @@ log.info(f"TELEGRAM_ENABLED = {TELEGRAM_ENABLED}")
 # --------------------------------------------------
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 # Tried Models
-# gpt-4.1-mini - Worst in counting chickes. Returns 5 where 0 chickens
+
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.0")
 
 def image_to_data_url(image_path):
@@ -272,7 +276,7 @@ def with_retries(fn, tries=4, delay=1.0, backoff=2.0, label="operation"):
 # --------------------------------------------------
 def goto_preset(cam_cfg):
     def _move():
-        cam = ONVIFCamera(cam_cfg["ip"], cam_cfg["port"], cam_cfg["user"], cam_cfg["pw"])
+        cam = ONVIFCamera(cam_cfg["ip"], cam_cfg["port"], cam_cfg["user"], cam_cfg["pw"], wsdl_dir=WSDL_DIR)
         media = cam.create_media_service()
         ptz = cam.create_ptz_service()
 
