@@ -110,6 +110,8 @@ log.info(f"TELEGRAM_ENABLED = {TELEGRAM_ENABLED}")
 # OpenAI Setup
 # --------------------------------------------------
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Tried Models
+# gpt-4.1-mini - Worst in counting chickes. Returns 5 where 0 chickens
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.0")
 
 def image_to_data_url(image_path):
