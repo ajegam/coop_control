@@ -173,7 +173,7 @@ DOOR_EXPECTED_STATE = DOOR_EXPECTED_OVERRIDE or (os.getenv("DOOR_EXPECTED_STATE"
 # ----------------------------
 # OpenAI
 # ----------------------------
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=45.0)
 
 log.info(f"RUN_CHICKEN={RUN_CHICKEN}, RUN_DOOR={RUN_DOOR}, TELEGRAM_ENABLED={TELEGRAM_ENABLED}")
