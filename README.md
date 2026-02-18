@@ -65,6 +65,17 @@ Create `.env` in the project root. Variables are validated based on which checks
 
 If you run with `--telegram_off`, Telegram env vars are not required.
 
+**OpenAI model (chicken count):** Counting chickens is very sensitive to the model version. Here are some we have tested:
+
+| Model | Notes |
+|-------|--------|
+| `gpt-4.1-mini` | Worst at counting chickens (e.g. returns 5 when there are 0). Default in code. |
+| `gpt-4.0` | Best at counting chickens; current OpenAI API no longer supports this. |
+| `gpt-4.1` | Better than 4.1-mini but still many mistakes. |
+| `gpt-4o` | Currently testing. |
+
+Set `OPENAI_MODEL` in `.env` to try different models.
+
 ## Usage
 
 ### coop_control.py
@@ -154,6 +165,7 @@ See `requirements.txt` for versions.
 
 ## Raspberry Pi notes
 
+- Currently tested on **Pi 4** with: `Linux raspberrypi 6.12.47+rpt-rpi-v8 #1 SMP PREEMPT Debian 1:6.12.47-1+rpt1~bookworm (2025-09-16) aarch64 GNU/Linux`.
 - Use **opencv-python-headless** (already in requirements) to avoid GUI deps and long builds.
 - Ensure `wsdl/` is present and contains the ONVIF bundle so ONVIF works without network WSDL fetch issues.
 - For scheduling, install the project under `/home/pi/projects/coop_control` and use a venv named `venv`, or edit the paths in `schedule_coop_control.py`.
