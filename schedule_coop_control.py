@@ -77,7 +77,6 @@ def build_cron_line(run_dt, command, tag):
     hour = run_dt.hour
     dom = run_dt.day
     month = run_dt.month
-
     return f"{minute} {hour} {dom} {month} * {command} # {CRON_MARKER} {tag}"
 
 
@@ -112,7 +111,7 @@ def main():
 
     # Commands (cd ensures .env/wsdl/logs resolve correctly)
     night_cmd = f'cd "{PROJECT_DIR}" && "{PYTHON_BIN}" "{COOP_CONTROL_PY}"'
-    morning_cmd = f'cd "{PROJECT_DIR}" && "{PYTHON_BIN}" "{COOP_CONTROL_PY}" --auto_door_close'
+    morning_cmd = f'cd "{PROJECT_DIR}" && "{PYTHON_BIN}" "{COOP_CONTROL_PY}" --auto_door_open'
 
     current_cron = read_crontab()
     cleaned_cron = remove_previous_entries(current_cron)
