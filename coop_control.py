@@ -5,78 +5,127 @@ import argparse
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
+from pathlib import Path
 import shutil
 import base64
 import re
+import socket
 
 import requests
 import cv2
 from dotenv import load_dotenv
 from onvif import ONVIFCamera
 from openai import OpenAI
-from pathlib import Path
 
-# Need for Camera WSDL
-WSDL_DIR = str(Path(__file__).resolve().parent / "wsdl")
+# ----------------------------
+# Networking safety
+# ----------------------------
+socket.setdefaulttimeout(20)
 
-# --------------------------------------------------
-# CLI FIRST
-# --------------------------------------------------
-parser = argparse.ArgumentParser()
-parser.add_argument("--telegram_off", action="store_true")
+# ----------------------------
+# CLI
+# ----------------------------
+parser = argparse.ArgumentParser(description="Chicken coop checks (roost + auto door)")
+
+parser.add_argument("--telegram_off", action="store_true", help="Disable Telegram sends (still logs what would be sent).")
+parser.add_argument("--chicken_count", action="store_true", help="Run only the roost chicken count check.")
+parser.add_argument("--auto_door_close", action="store_true", help="Run only the auto door check expecting CLOSED.")
+parser.add_argument("--auto_door_open", action="store_true", help="Run only the auto door check expecting OPEN.")
+
 args = parser.parse_args()
+
 TELEGRAM_ENABLED = not args.telegram_off
 
-# --------------------------------------------------
-# Load .env (override system env!)
-# --------------------------------------------------
+# Determine run plan:
+# - If no mode flags provided -> default nightly: chicken_count + auto_door_close
+any_mode = args.chicken_count or args.auto_door_close or args.auto_door_open
+RUN_CHICKEN = args.chicken_count or (not any_mode)
+RUN_DOOR = args.auto_door_close or args.auto_door_open or (not any_mode)
+
+# Door expected state comes from flags, else env (default nightly uses CLOSED if env missing? we validate)
+DOOR_EXPECTED_OVERRIDE = None
+if args.auto_door_close:
+    DOOR_EXPECTED_OVERRIDE = "CLOSED"
+if args.auto_door_open:
+    DOOR_EXPECTED_OVERRIDE = "OPEN"
+
+if args.auto_door_close and args.auto_door_open:
+    print("❌ Use only one: --auto_door_close or --auto_door_open")
+    sys.exit(1)
+
+# ----------------------------
+# Load .env (override system env)
+# ----------------------------
 load_dotenv(override=True)
 
-# --------------------------------------------------
-# Logging Setup
-# --------------------------------------------------
+# ----------------------------
+# Logging
+# ----------------------------
 def setup_logger():
     logger = logging.getLogger("coop_monitor")
     logger.setLevel(logging.INFO)
 
-    formatter = logging.Formatter(
+    fmt = logging.Formatter(
         "%(asctime)s | %(levelname)s | %(message)s",
         "%Y-%m-%d %H:%M:%S",
     )
 
     os.makedirs("logs", exist_ok=True)
 
-    file_handler = RotatingFileHandler(
-        "logs/coop_monitor.log",
-        maxBytes=1_000_000,
-        backupCount=5,
-    )
-    file_handler.setFormatter(formatter)
+    fh = RotatingFileHandler("logs/coop_monitor.log", maxBytes=1_000_000, backupCount=5)
+    fh.setFormatter(fmt)
 
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
+    ch = logging.StreamHandler()
+    ch.setFormatter(fmt)
 
     if not logger.handlers:
-        logger.addHandler(file_handler)
-        logger.addHandler(console_handler)
+        logger.addHandler(fh)
+        logger.addHandler(ch)
 
     return logger
 
 log = setup_logger()
 
-# --------------------------------------------------
-# Validate Environment Variables
-# --------------------------------------------------
-def validate_env():
-    required = [
-        "ROOST_IP", "ROOST_USER", "ROOST_PASS", "ROOST_PRESET",
-        "AUTO_DOOR_IP", "AUTO_DOOR_USER", "AUTO_DOOR_PASS", "AUTO_DOOR_PRESET",
-        "TOTAL_CHICKENS", "DOOR_EXPECTED_STATE",
-        "OPENAI_API_KEY",
-    ]
+# ----------------------------
+# WSDL directory (repo-local)
+# ----------------------------
+WSDL_DIR = str(Path(__file__).resolve().parent / "wsdl")
 
+# ----------------------------
+# Validation
+# ----------------------------
+def _require(var: str, required_list: list[str]):
+    required_list.append(var)
+
+def validate_env():
+    required = []
+
+    # OpenAI always required (we always analyze images in these modes)
+    _require("OPENAI_API_KEY", required)
+
+    # Telegram required only if enabled
     if TELEGRAM_ENABLED:
-        required.extend(["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"])
+        _require("TELEGRAM_BOT_TOKEN", required)
+        _require("TELEGRAM_CHAT_ID", required)
+
+    # Chicken check requirements
+    if RUN_CHICKEN:
+        _require("ROOST_IP", required)
+        _require("ROOST_USER", required)
+        _require("ROOST_PASS", required)
+        _require("ROOST_PRESET", required)
+        _require("TOTAL_CHICKENS", required)
+
+    # Door check requirements
+    if RUN_DOOR:
+        _require("AUTO_DOOR_IP", required)
+        _require("AUTO_DOOR_USER", required)
+        _require("AUTO_DOOR_PASS", required)
+        _require("AUTO_DOOR_PRESET", required)
+
+        # If no override flag, we use env DOOR_EXPECTED_STATE (nightly default)
+        if DOOR_EXPECTED_OVERRIDE is None:
+            _require("DOOR_EXPECTED_STATE", required)
 
     missing = [v for v in required if not (os.getenv(v) or "").strip()]
     if missing:
@@ -86,108 +135,117 @@ def validate_env():
         print("\nCheck your .env file.\n")
         sys.exit(1)
 
-    # Validate TOTAL_CHICKENS
-    try:
-        tc = int(os.getenv("TOTAL_CHICKENS"))
-        if tc <= 0:
-            raise ValueError
-    except ValueError:
-        print("❌ TOTAL_CHICKENS must be a positive integer.")
-        sys.exit(1)
+    # Validate TOTAL_CHICKENS if needed
+    if RUN_CHICKEN:
+        try:
+            tc = int(os.getenv("TOTAL_CHICKENS"))
+            if tc <= 0:
+                raise ValueError
+        except ValueError:
+            print("❌ TOTAL_CHICKENS must be a positive integer.")
+            sys.exit(1)
 
-    # Validate door expected state
-    des = os.getenv("DOOR_EXPECTED_STATE").strip().upper()
-    if des not in ("OPEN", "CLOSED"):
-        print("❌ DOOR_EXPECTED_STATE must be OPEN or CLOSED.")
-        sys.exit(1)
+    # Validate door expected state if needed (env only)
+    if RUN_DOOR and DOOR_EXPECTED_OVERRIDE is None:
+        des = os.getenv("DOOR_EXPECTED_STATE").strip().upper()
+        if des not in ("OPEN", "CLOSED"):
+            print("❌ DOOR_EXPECTED_STATE must be OPEN or CLOSED.")
+            sys.exit(1)
+
+    # Validate WSDL folder
+    if RUN_CHICKEN or RUN_DOOR:
+        if not Path(WSDL_DIR).exists():
+            print(f"❌ WSDL_DIR not found: {WSDL_DIR}")
+            print("Create wsdl/ in repo and populate it with the full ONVIF wsdl/xsd bundle.")
+            sys.exit(1)
+        if not (Path(WSDL_DIR) / "devicemgmt.wsdl").exists():
+            print(f"❌ Missing devicemgmt.wsdl in {WSDL_DIR}")
+            sys.exit(1)
+        if not (Path(WSDL_DIR) / "onvif.xsd").exists():
+            print(f"❌ Missing onvif.xsd in {WSDL_DIR}")
+            sys.exit(1)
 
 validate_env()
 
-TOTAL_CHICKENS = int(os.getenv("TOTAL_CHICKENS"))
-DOOR_EXPECTED_STATE = os.getenv("DOOR_EXPECTED_STATE").strip().upper()
+TOTAL_CHICKENS = int(os.getenv("TOTAL_CHICKENS")) if RUN_CHICKEN else None
+DOOR_EXPECTED_STATE = DOOR_EXPECTED_OVERRIDE or (os.getenv("DOOR_EXPECTED_STATE").strip().upper() if RUN_DOOR else None)
 
-log.info(f"TOTAL_CHICKENS loaded = {TOTAL_CHICKENS}")
-log.info(f"DOOR_EXPECTED_STATE loaded = {DOOR_EXPECTED_STATE}")
-log.info(f"TELEGRAM_ENABLED = {TELEGRAM_ENABLED}")
+# ----------------------------
+# OpenAI
+# ----------------------------
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"), timeout=45.0)
 
-# --------------------------------------------------
-# OpenAI Setup
-# --------------------------------------------------
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-# Tried Models
+log.info(f"RUN_CHICKEN={RUN_CHICKEN}, RUN_DOOR={RUN_DOOR}, TELEGRAM_ENABLED={TELEGRAM_ENABLED}")
+log.info(f"OPENAI_MODEL loaded = {OPENAI_MODEL}")
+if RUN_CHICKEN:
+    log.info(f"TOTAL_CHICKENS loaded = {TOTAL_CHICKENS}")
+if RUN_DOOR:
+    log.info(f"DOOR_EXPECTED_STATE = {DOOR_EXPECTED_STATE}")
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1")
-
-def image_to_data_url(image_path):
+def image_to_data_url(image_path: str) -> str:
     with open(image_path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("utf-8")
     return f"data:image/jpeg;base64,{b64}"
 
-def openai_roost_count(image_path):
+def _openai_run_count_prompt(data_url: str, prompt: str) -> int:
+    resp = client.responses.create(
+        model=OPENAI_MODEL,
+        input=[{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": prompt},
+                {"type": "input_image", "image_url": data_url},
+            ],
+        }],
+    )
+    text = resp.output_text.strip()
+    m = re.search(r"\d+", text)
+    if not m:
+        raise RuntimeError(f"Could not parse count from: {text!r}")
+    return int(m.group(0))
+
+def openai_roost_count(image_path: str) -> int:
+    """
+    Two-pass logic:
+      pass1 -> if != TOTAL_CHICKENS -> pass2 strict recount
+    """
     data_url = image_to_data_url(image_path)
 
-    # -------------------------
-    # PASS 1 (normal count)
-    # -------------------------
     prompt_pass1 = (
         f"Count the number of chickens visible in this image.\n"
         f"Count the chickens one by one.\n"
-        f"Identify chickens by locating heads or eye reflections.\n"
-        f"If these are not visible then use body shapes.\n"
+        f"Identify chickens by locating heads or eye reflections. If these are not visible then use body shapes.\n"
         f"Some chickens may be partially hidden or overlapping.\n"
         f"Assume no chicken is fully occluded unless proven otherwise.\n"
         f"Carefully check edges, corners, and underneath other chickens.\n"
         f"The amount we are looking for is {TOTAL_CHICKENS}.\n"
         f"If the count is less than {TOTAL_CHICKENS}, do a recount but don't make up numbers.\n"
+        f"These chickens are roosting in a coop and so there won't be spaces between them.\n"
+        f"Sometimes one of the chicken can be sitting underneath the chickens sitting in the front roost.\n"
         f"Return ONLY a single integer. No words."
     )
 
-    def run_prompt(prompt_text):
-        resp = client.responses.create(
-            model=OPENAI_MODEL,
-            input=[{
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": prompt_text},
-                    {"type": "input_image", "image_url": data_url},
-                ],
-            }],
-        )
-        text = resp.output_text.strip()
-        match = re.search(r"\d+", text)
-        if not match:
-            raise RuntimeError(f"Could not parse count from: {text}")
-        return int(match.group(0))
-
-    count1 = run_prompt(prompt_pass1)
+    count1 = _openai_run_count_prompt(data_url, prompt_pass1)
     log.info(f"OpenAI pass1 chicken count = {count1}")
 
-    # -------------------------
-    # If correct, return immediately
-    # -------------------------
     if count1 == TOTAL_CHICKENS:
         return count1
 
-    # -------------------------
-    # PASS 2 (strict recount)
-    # -------------------------
     prompt_pass2 = (
-        f"You previously counted {count1} chickens.\n"
-        f"The expected total is {TOTAL_CHICKENS}.\n"
+        f"You previously counted {count1} chickens, but the expected total is {TOTAL_CHICKENS}.\n"
         f"Do a FULL recount carefully.\n"
-        f"List chickens mentally one-by-one before giving final answer.\n"
+        f"Count one-by-one and avoid double counting.\n"
         f"Look for hidden chickens underneath or overlapping.\n"
-        f"Be conservative. Do not double count.\n"
+        f"Be conservative: do not invent chickens.\n"
         f"Return ONLY the final integer count. No words."
     )
 
-    count2 = run_prompt(prompt_pass2)
+    count2 = _openai_run_count_prompt(data_url, prompt_pass2)
     log.info(f"OpenAI pass2 chicken count = {count2}")
-
     return count2
 
-
-def openai_door_state(image_path):
+def openai_door_state(image_path: str) -> str:
     data_url = image_to_data_url(image_path)
 
     prompt = (
@@ -211,149 +269,145 @@ def openai_door_state(image_path):
         return "CLOSED"
     if "OPEN" in text:
         return "OPEN"
-    raise RuntimeError(f"Could not parse door state from: {text}")
+    raise RuntimeError(f"Could not parse door state from: {text!r}")
 
-# --------------------------------------------------
-# Format Messages
-# --------------------------------------------------
-def format_roost_message(found):
+# ----------------------------
+# Message formatting
+# ----------------------------
+def format_roost_message(found: int) -> str:
     if found == TOTAL_CHICKENS:
         return f"🐔 All {found} out of {TOTAL_CHICKENS} chickens found."
     return f"🔴 PROBLEM: Only {found} out of {TOTAL_CHICKENS} chickens found."
 
-def format_door_message(state):
+def format_door_message(state: str) -> str:
     if state == DOOR_EXPECTED_STATE:
         return f"🚪 Door is {state} (OK)."
     return f"🔴 PROBLEM: Door is {state}, expected {DOOR_EXPECTED_STATE}."
 
-# --------------------------------------------------
-# Camera Config
-# --------------------------------------------------
-CAMERAS = {
-    "roost": {
-        "ip": os.getenv("ROOST_IP"),
-        "port": int(os.getenv("ROOST_ONVIF_PORT", "8000")),
-        "user": os.getenv("ROOST_USER"),
-        "pw": os.getenv("ROOST_PASS"),
-        "preset": os.getenv("ROOST_PRESET"),
-        "jpg_base": "roost",
-    },
-    "auto_door": {
-        "ip": os.getenv("AUTO_DOOR_IP"),
-        "port": int(os.getenv("AUTO_DOOR_ONVIF_PORT", "8000")),
-        "user": os.getenv("AUTO_DOOR_USER"),
-        "pw": os.getenv("AUTO_DOOR_PASS"),
-        "preset": os.getenv("AUTO_DOOR_PRESET"),
-        "jpg_base": "auto_door",
-    },
-}
-
-def build_rtsp(user, pw, ip):
-    return f"rtsp://{user}:{pw}@{ip}:554/h264Preview_01_main"
-
-# --------------------------------------------------
-# Retry Helper
-# --------------------------------------------------
+# ----------------------------
+# Retry helper
+# ----------------------------
 def with_retries(fn, tries=4, delay=1.0, backoff=2.0, label="operation"):
     current_delay = delay
-    last_exception = None
-
+    last_exc = None
     for attempt in range(1, tries + 1):
         try:
             return fn()
         except Exception as e:
-            last_exception = e
+            last_exc = e
             if attempt == tries:
                 break
             log.warning(f"{label} failed (attempt {attempt}/{tries}): {e}")
             time.sleep(current_delay)
             current_delay *= backoff
+    raise last_exc
 
-    raise last_exception
+# ----------------------------
+# ONVIF + RTSP
+# ----------------------------
+def build_rtsp(user: str, pw: str, ip: str) -> str:
+    return f"rtsp://{user}:{pw}@{ip}:554/h264Preview_01_main"
 
-# --------------------------------------------------
-# Move to Preset
-# --------------------------------------------------
-def goto_preset(cam_cfg):
+def goto_preset(ip: str, port: int, user: str, pw: str, preset_name: str) -> None:
     def _move():
-        cam = ONVIFCamera(cam_cfg["ip"], cam_cfg["port"], cam_cfg["user"], cam_cfg["pw"], wsdl_dir=WSDL_DIR)
+        cam = ONVIFCamera(ip, port, user, pw, wsdl_dir=WSDL_DIR)
         media = cam.create_media_service()
         ptz = cam.create_ptz_service()
 
         profile = media.GetProfiles()[0]
-        presets = ptz.GetPresets({"ProfileToken": profile.token})
+        presets = ptz.GetPresets({"ProfileToken": profile.token}) or []
 
-        wanted = cam_cfg["preset"].strip().lower()
+        wanted = preset_name.strip().lower()
+        match = None
         for p in presets:
             name = (getattr(p, "Name", "") or "").strip().lower()
             if name == wanted:
-                req = ptz.create_type("GotoPreset")
-                req.ProfileToken = profile.token
-                req.PresetToken = p.token
-                ptz.GotoPreset(req)
-                return
+                match = p
+                break
 
-        raise RuntimeError(f"Preset '{cam_cfg['preset']}' not found")
+        if not match:
+            available = [getattr(p, "Name", "") for p in presets]
+            raise RuntimeError(f"Preset '{preset_name}' not found. Available: {available}")
+
+        req = ptz.create_type("GotoPreset")
+        req.ProfileToken = profile.token
+        req.PresetToken = match.token
+        ptz.GotoPreset(req)
 
     with_retries(_move, label="GotoPreset")
 
-# --------------------------------------------------
-# Capture JPG
-# --------------------------------------------------
-def capture_jpg(cam_cfg):
+def capture_jpg(ip: str, user: str, pw: str, base_name: str) -> str:
+    os.makedirs("logs", exist_ok=True)
+
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    base = cam_cfg["jpg_base"]
+    timestamped = f"logs/{base_name}_{timestamp}.jpg"
+    latest = f"logs/{base_name}.jpg"
 
-    timestamped = f"logs/{base}_{timestamp}.jpg"
-    latest = f"logs/{base}.jpg"
+    rtsp = build_rtsp(user, pw, ip)
 
-    def _capture():
-        rtsp = build_rtsp(cam_cfg["user"], cam_cfg["pw"], cam_cfg["ip"])
+    def _cap():
         cap = cv2.VideoCapture(rtsp)
+
+        # Some OpenCV builds honor these; harmless if ignored
+        try:
+            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000)
+        except Exception:
+            pass
+
         time.sleep(1.5)
         ok, frame = cap.read()
         cap.release()
 
         if not ok or frame is None:
-            raise RuntimeError("RTSP capture failed")
+            raise RuntimeError("RTSP frame capture failed")
 
-        cv2.imwrite(timestamped, frame)
+        if not cv2.imwrite(timestamped, frame):
+            raise RuntimeError("Failed to write JPG")
+
         shutil.copyfile(timestamped, latest)
 
-    with_retries(_capture, label="RTSP Capture")
+    with_retries(_cap, label="RTSP Capture")
     return timestamped
 
-# --------------------------------------------------
-# Move + Capture
-# --------------------------------------------------
-def move_then_capture(camera_name, settle_seconds=4.0):
-    cam_cfg = CAMERAS[camera_name]
-    log.info(f"Starting {camera_name} check")
+def move_then_capture_roost(settle_seconds: float = 4.0) -> str:
+    ip = os.getenv("ROOST_IP")
+    port = int(os.getenv("ROOST_ONVIF_PORT", "8000"))
+    user = os.getenv("ROOST_USER")
+    pw = os.getenv("ROOST_PASS")
+    preset = os.getenv("ROOST_PRESET")
 
-    goto_preset(cam_cfg)
+    log.info("Starting roost check")
+    goto_preset(ip, port, user, pw, preset)
     time.sleep(settle_seconds)
 
-    img = capture_jpg(cam_cfg)
-    log.info(f"{camera_name} image saved: {img}")
+    img = capture_jpg(ip, user, pw, base_name="roost")
+    log.info(f"roost image saved: {img}")
     return img
 
-# --------------------------------------------------
-# Telegram Sender (ALWAYS logs message)
-# --------------------------------------------------
-from datetime import datetime
+def move_then_capture_auto_door(settle_seconds: float = 4.0) -> str:
+    ip = os.getenv("AUTO_DOOR_IP")
+    port = int(os.getenv("AUTO_DOOR_ONVIF_PORT", "8000"))
+    user = os.getenv("AUTO_DOOR_USER")
+    pw = os.getenv("AUTO_DOOR_PASS")
+    preset = os.getenv("AUTO_DOOR_PRESET")
 
-def send_telegram(text, image_path=None):
-    """
-    Always logs what would be sent.
-    Caption format:
-      🕒 YYYY-MM-DD HH:MM:SS AM/PM
-      <message>
-    """
+    log.info("Starting auto_door check")
+    goto_preset(ip, port, user, pw, preset)
+    time.sleep(settle_seconds)
 
+    img = capture_jpg(ip, user, pw, base_name="auto_door")
+    log.info(f"auto_door image saved: {img}")
+    return img
+
+# ----------------------------
+# Telegram (always logs message)
+# ----------------------------
+def send_telegram(text: str, image_path: str | None = None) -> None:
     ts = datetime.now().strftime("%Y-%m-%d %I:%M:%S %p")
     caption = f"🕒 {ts}\n{text}"
 
-    # Always log intended message (with timestamp)
+    # Always log what would be sent
     if image_path:
         log.info(f"[TELEGRAM] caption={caption!r} | image={image_path}")
     else:
@@ -391,27 +445,33 @@ def send_telegram(text, image_path=None):
     except Exception as e:
         log.warning(f"Telegram send failed: {e}")
 
-# --------------------------------------------------
-# Main
-# --------------------------------------------------
+# ----------------------------
+# Main flow
+# ----------------------------
+def run_chicken_check():
+    img = move_then_capture_roost()
+    try:
+        count = openai_roost_count(img)
+        msg = format_roost_message(count)
+    except Exception as e:
+        msg = f"🔴 PROBLEM: Roost analysis failed ({e})"
+        log.warning(msg)
+    send_telegram(msg, img)
+
+def run_door_check():
+    img = move_then_capture_auto_door()
+    try:
+        state = openai_door_state(img)
+        msg = format_door_message(state)
+    except Exception as e:
+        msg = f"🔴 PROBLEM: Door analysis failed ({e})"
+        log.warning(msg)
+    send_telegram(msg, img)
+
 if __name__ == "__main__":
+    # Run requested checks
+    if RUN_CHICKEN:
+        run_chicken_check()
 
-    # ROOST
-    roost_img = move_then_capture("roost")
-    try:
-        count = openai_roost_count(roost_img)
-        roost_msg = format_roost_message(count)
-    except Exception as e:
-        roost_msg = f"🔴 PROBLEM: Roost analysis failed ({e})"
-
-    send_telegram(roost_msg, roost_img)
-
-    # AUTO DOOR
-    door_img = move_then_capture("auto_door")
-    try:
-        state = openai_door_state(door_img)
-        door_msg = format_door_message(state)
-    except Exception as e:
-        door_msg = f"🔴 PROBLEM: Door analysis failed ({e})"
-
-    send_telegram(door_msg, door_img)
+    if RUN_DOOR:
+        run_door_check()
