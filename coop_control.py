@@ -298,7 +298,12 @@ def openai_door_state(image_path: str) -> str:
     data_url = image_to_data_url(image_path)
 
     prompt = (
-        "Is the chicken coop door OPEN or CLOSED?\n"
+        "This is a chicken coop auto-door: a solid panel that slides down (CLOSED) or up (OPEN) in a wooden frame.\n"
+        "Focus ONLY on the lower-center of the image, where the panel's bottom edge sits. Ignore the frame, walls, and mesh.\n"
+        "CLOSED: panel is solid all the way down, no gap — a white tape arrow marker near the bottom is fully visible (body + head).\n"
+        "OPEN: there is a rectangular gap/hole near the bottom of the panel showing the ramp/plank behind it. "
+        "Even a small opening counts as OPEN.\n"
+        "Works for both daytime and nighttime infrared photos. Do not guess from overall appearance — base it only on whether the bottom opening is present.\n"
         "Return ONLY one word: OPEN or CLOSED."
     )
 
