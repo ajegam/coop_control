@@ -46,4 +46,7 @@ Thumbs.db
 *.jpg
 logs/
 
+# Claude Code local state
+.claude/settings.local.json
+.claude/worktrees/
 
