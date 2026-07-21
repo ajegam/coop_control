@@ -42,6 +42,8 @@ There are no automated tests or linters configured in this repo. "Testing" a cha
 
 Run once daily (e.g. from cron at 00:01) on the Pi. It fetches sunrise/sunset for Los Gatos, CA from sunrise-sunset.org (retries 5x, then falls back to a cached `logs/sun_times_cache.json` if the API is unreachable), then **rewrites the crontab**: removes any line containing the `COOP_CONTROL_SCHEDULED` marker and adds two fresh entries — one at sunset+offset (default 60 min) running the default `coop_control.py` (nightly chicken+door-closed check), one at sunrise+offset (default 30 min) running `coop_control.py --auto_door_open`.
 
+If the cache fallback is in use and the cached data is older than `STALE_CACHE_WARNING_DAYS` (env var, default 7), `fetch_sunrise_sunset()` logs a WARNING and sends a Telegram alert on every invocation until the API recovers — this is the one place `schedule_coop_control.py` talks to Telegram directly (it has its own `send_telegram_warning()`, not shared with `coop_control.py`'s `send_telegram()`, consistent with the two scripts staying decoupled).
+
 This script has hard-coded Pi paths at the top (`PROJECT_DIR`, `PYTHON_BIN`, `COOP_CONTROL_PY`) that must match wherever it's actually deployed — update these together if the install location changes, they are not derived from `__file__`.
 
 ```bash

@@ -62,6 +62,8 @@ Create `.env` in the project root. Variables are validated based on which checks
 | `AUTO_DOOR_PRESET` | Door check | Preset name |
 | `AUTO_DOOR_ONVIF_PORT` | Optional | ONVIF port (default: 8000) |
 | `DOOR_EXPECTED_STATE` | Door check (if not overridden by CLI) | `OPEN` or `CLOSED` (e.g. CLOSED for nightly) |
+| **Scheduler (`schedule_coop_control.py`)** | | |
+| `STALE_CACHE_WARNING_DAYS` | Optional | Days the cached sunrise/sunset data can be used while the API is down before warning via Telegram + log (default: 7) |
 
 If you run with `--telegram_off`, Telegram env vars are not required.
 
@@ -112,6 +114,8 @@ Schedules two daily runs using [sunrise-sunset.org](https://sunrise-sunset.org) 
 - **After sunrise** (sunrise + offset, default 30 min): runs `coop_control.py --auto_door_open`.
 
 It **rewrites your crontab** and removes any existing lines containing `COOP_CONTROL_SCHEDULED`, then adds the two new entries.
+
+If the sunrise-sunset.org API is down, it falls back to the cached `logs/sun_times_cache.json` values so scheduling doesn't fail outright. If that cached data is older than `STALE_CACHE_WARNING_DAYS` (default 7), it logs a WARNING and sends a Telegram alert **on every run** until the API recovers, so a long outage doesn't silently drift the schedule.
 
 **Paths:** The script uses hard-coded paths for a Pi:
 

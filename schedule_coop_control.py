@@ -3,12 +3,16 @@
 import argparse
 import datetime as dt
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
+from dotenv import load_dotenv
+
+load_dotenv(override=True)
 
 # --------------------------------------------------
 # Configuration
@@ -27,6 +31,30 @@ LOS_GATOS_LON = -121.9623
 TZ = ZoneInfo("America/Los_Angeles")
 
 CRON_MARKER = "COOP_CONTROL_SCHEDULED"
+
+STALE_CACHE_WARNING_DAYS = int(os.getenv("STALE_CACHE_WARNING_DAYS", "7"))
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+
+def send_telegram_warning(text: str) -> None:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print(f"[schedule] Telegram not configured, warning not sent: {text}")
+        return
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    try:
+        r = requests.post(
+            url,
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": text},
+            timeout=(10, 30),
+        )
+        if not r.ok:
+            print(f"[schedule] Failed to send Telegram warning: {r.status_code} {r.text}")
+    except Exception as e:
+        print(f"[schedule] Failed to send Telegram warning: {e}")
+
 
 # --------------------------------------------------
 # Sunrise / Sunset
@@ -112,6 +140,18 @@ def fetch_sunrise_sunset(date_str: str):
         print("[schedule] Using cached sunrise/sunset values.")
 
         cached = json.loads(CACHE_FILE.read_text())
+
+        cache_date = dt.datetime.strptime(cached["date"], "%Y-%m-%d").date()
+        cache_age_days = (dt.datetime.now(TZ).date() - cache_date).days
+
+        if cache_age_days >= STALE_CACHE_WARNING_DAYS:
+            warning = (
+                f"Sunrise/sunset API has been unavailable and the cached sun times are "
+                f"{cache_age_days} day(s) old (threshold: {STALE_CACHE_WARNING_DAYS}). "
+                f"Coop door scheduling is running on stale data."
+            )
+            print(f"[schedule] WARNING: {warning}")
+            send_telegram_warning(f"⚠️ {warning}")
 
         cached_sunrise = dt.datetime.fromisoformat(
             cached["sunrise"]
